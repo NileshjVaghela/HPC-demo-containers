@@ -1,0 +1,704 @@
+HPC with Slurm - Physical Server Setup
+1 Master Node + 3 Worker Nodes
+=======================================
+Plain language. No fluff. Just what you need.
+
+
+ASSUMPTIONS
+-----------
+  - All 4 servers are running Ubuntu 22.04 LTS
+  - All servers are on the same local network
+  - You have root access on all machines
+  - Static IPs are already assigned
+
+Our setup:
+  master  192.168.1.10
+  worker1 192.168.1.11
+  worker2 192.168.1.12
+  worker3 192.168.1.13
+
+
+================================================================
+PART 1 - SETTING UP THE MASTER NODE
+================================================================
+
+First, set the hostname on the master:
+
+    hostnamectl set-hostname master
+
+Edit /etc/hosts on ALL machines (master and all workers).
+Add these lines at the bottom:
+
+    192.168.1.10  master
+    192.168.1.11  worker1
+    192.168.1.12  worker2
+    192.168.1.13  worker3
+
+This lets all machines talk to each other by name.
+
+-- Install required packages on master --
+
+    apt update && apt upgrade -y
+    apt install -y munge slurm-wm nfs-kernel-server slurmctld slurmdbd
+
+-- Set up Munge on master --
+
+Munge handles authentication between all nodes.
+Generate the munge key (only do this on master):
+
+    create-munge-key
+    chown munge:munge /etc/munge/munge.key
+    chmod 400 /etc/munge/munge.key
+
+Start and enable munge:
+
+    systemctl enable munge
+    systemctl start munge
+
+Test it:
+    munge -n | unmunge
+
+You should see "STATUS: Success". If not, check ownership of munge.key.
+
+-- Set up NFS shared storage on master --
+
+All nodes need to share the same home directory so job scripts and
+output files are visible everywhere.
+
+Create the shared directory:
+
+    mkdir -p /shared
+    chown nobody:nogroup /shared
+    chmod 777 /shared
+
+Edit /etc/exports and add:
+
+    /shared  192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
+
+Apply the export:
+
+    exportfs -a
+    systemctl enable nfs-kernel-server
+    systemctl start nfs-kernel-server
+
+-- Create slurm user on master --
+
+Slurm needs a dedicated system user. Same UID/GID must exist on ALL nodes.
+
+    groupadd -g 1001 slurm
+    useradd -m -c "Slurm Workload Manager" -d /var/lib/slurm \
+            -u 1001 -g slurm -s /bin/bash slurm
+
+-- Create Slurm directories on master --
+
+    mkdir -p /var/spool/slurmctld
+    mkdir -p /var/log/slurm
+    chown slurm:slurm /var/spool/slurmctld
+    chown slurm:slurm /var/log/slurm
+
+-- Write the slurm.conf on master --
+
+This is the main config file. Create /etc/slurm/slurm.conf with:
+
+    ClusterName=mycluster
+    SlurmctldHost=master
+    AuthType=auth/munge
+    CryptoType=crypto/munge
+    MpiDefault=none
+    ProctrackType=proctrack/pgid
+    ReturnToService=2
+    SlurmctldPidFile=/var/run/slurmctld.pid
+    SlurmdPidFile=/var/run/slurmd.pid
+    SlurmdSpoolDir=/var/spool/slurmd
+    SlurmUser=slurm
+    StateSaveLocation=/var/spool/slurmctld
+    SwitchType=switch/none
+    TaskPlugin=task/affinity
+
+    # Logging
+    SlurmctldLogFile=/var/log/slurm/slurmctld.log
+    SlurmdLogFile=/var/log/slurm/slurmd.log
+
+    # Scheduling
+    SchedulerType=sched/backfill
+    SelectType=select/cons_tres
+    SelectTypeParameters=CR_Core
+
+    # Time limits
+    InactiveLimit=0
+    KillWait=30
+    MinJobAge=300
+    SlurmctldTimeout=120
+    SlurmdTimeout=300
+    Waittime=0
+
+    # Node definitions
+    # Adjust CPUs and RealMemory to match your actual hardware
+    NodeName=worker1 NodeAddr=192.168.1.11 CPUs=8 RealMemory=16000 State=UNKNOWN
+    NodeName=worker2 NodeAddr=192.168.1.12 CPUs=8 RealMemory=16000 State=UNKNOWN
+    NodeName=worker3 NodeAddr=192.168.1.13 CPUs=8 RealMemory=16000 State=UNKNOWN
+
+    # Partition (queue) definition
+    PartitionName=normal Nodes=worker[1-3] Default=YES MaxTime=INFINITE State=UP
+
+Adjust CPUs and RealMemory to match your actual worker hardware.
+To check CPU count on a worker: nproc
+To check RAM on a worker: free -m
+
+-- Start slurmctld on master --
+
+    systemctl enable slurmctld
+    systemctl start slurmctld
+
+Check it's running:
+    systemctl status slurmctld
+
+Check the log if something went wrong:
+    tail -f /var/log/slurm/slurmctld.log
+
+
+================================================================
+PART 2 - SETTING UP EACH WORKER NODE
+================================================================
+
+Do these steps on worker1, worker2, and worker3.
+Run everything as root.
+
+-- Set hostname (do on each worker separately) --
+
+On worker1:   hostnamectl set-hostname worker1
+On worker2:   hostnamectl set-hostname worker2
+On worker3:   hostnamectl set-hostname worker3
+
+-- Edit /etc/hosts on each worker --
+
+Same as master. Add all four entries:
+
+    192.168.1.10  master
+    192.168.1.11  worker1
+    192.168.1.12  worker2
+    192.168.1.13  worker3
+
+-- Install packages on each worker --
+
+    apt update && apt upgrade -y
+    apt install -y munge slurm-wm slurmd nfs-common
+
+-- Copy munge key from master to each worker --
+
+Back on the MASTER, copy the key to each worker:
+
+    scp /etc/munge/munge.key root@worker1:/etc/munge/munge.key
+    scp /etc/munge/munge.key root@worker2:/etc/munge/munge.key
+    scp /etc/munge/munge.key root@worker3:/etc/munge/munge.key
+
+Now on EACH WORKER, fix permissions:
+
+    chown munge:munge /etc/munge/munge.key
+    chmod 400 /etc/munge/munge.key
+    systemctl enable munge
+    systemctl start munge
+
+Test munge on each worker:
+    munge -n | unmunge
+
+Should say "STATUS: Success".
+
+-- Mount shared NFS on each worker --
+
+    mkdir -p /shared
+
+Edit /etc/fstab on each worker and add this line:
+
+    master:/shared  /shared  nfs  defaults  0  0
+
+Mount it now without rebooting:
+
+    mount -a
+
+Check it mounted:
+    df -h | grep shared
+
+-- Create slurm user on each worker --
+
+Must be the exact same UID and GID as on master:
+
+    groupadd -g 1001 slurm
+    useradd -m -c "Slurm Workload Manager" -d /var/lib/slurm \
+            -u 1001 -g slurm -s /bin/bash slurm
+
+-- Create slurm directories on each worker --
+
+    mkdir -p /var/spool/slurmd
+    mkdir -p /var/log/slurm
+    chown slurm:slurm /var/spool/slurmd
+    chown slurm:slurm /var/log/slurm
+
+-- Copy slurm.conf from master to each worker --
+
+On MASTER, run:
+
+    scp /etc/slurm/slurm.conf root@worker1:/etc/slurm/slurm.conf
+    scp /etc/slurm/slurm.conf root@worker2:/etc/slurm/slurm.conf
+    scp /etc/slurm/slurm.conf root@worker3:/etc/slurm/slurm.conf
+
+Every node must have the identical slurm.conf. If you change it on master
+later, copy it out to workers again.
+
+-- Start slurmd on each worker --
+
+    systemctl enable slurmd
+    systemctl start slurmd
+
+Check status:
+    systemctl status slurmd
+
+Check log:
+    tail -f /var/log/slurm/slurmd.log
+
+
+================================================================
+PART 3 - SETTING UP COMMUNICATION BETWEEN MASTER AND WORKERS
+================================================================
+
+Slurm uses Munge for authentication (already done above), but there are
+a few more things to make communication smooth.
+
+-- Set up SSH key-based login from master to all workers --
+
+On MASTER only:
+
+    ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
+
+Copy the public key to each worker:
+
+    ssh-copy-id root@worker1
+    ssh-copy-id root@worker2
+    ssh-copy-id root@worker3
+
+Test it:
+    ssh root@worker1 hostname
+    ssh root@worker2 hostname
+    ssh root@worker3 hostname
+
+Each should return the worker hostname without asking for a password.
+
+-- Open firewall ports (do on ALL nodes) --
+
+Slurm uses ports 6817 (slurmctld) and 6818 (slurmd).
+
+    ufw allow 6817/tcp
+    ufw allow 6818/tcp
+    ufw allow from 192.168.1.0/24
+
+NFS needs these:
+
+    ufw allow from 192.168.1.0/24 to any port 2049
+
+-- Verify nodes are visible from master --
+
+On MASTER:
+
+    sinfo
+
+You should see all three workers listed. State will be "idle" if everything
+is working. If state is "down" or "unk", check:
+
+  1. Is slurmd running on that worker?
+  2. Is munge running on that worker?
+  3. Can master SSH into that worker?
+  4. Is the slurm.conf identical on all nodes?
+
+To bring a node back up manually:
+
+    scontrol update nodename=worker1 state=resume
+
+-- Test that a job actually runs across nodes --
+
+    srun --nodes=3 --ntasks=3 hostname
+
+You should see worker1, worker2, worker3 each print their name.
+That confirms all three are reachable and accepting work.
+
+
+================================================================
+PART 4 - BASIC MONITORING WITH GANGLIA
+================================================================
+
+Ganglia gives you a web dashboard showing CPU, memory, network, and disk
+usage across all your nodes in real time.
+
+Architecture:
+  - gmond runs on every node (collects metrics)
+  - gmetad runs on master only (aggregates metrics)
+  - ganglia-web runs on master only (web UI)
+
+-- Install on master --
+
+    apt install -y ganglia-monitor gmetad ganglia-webfrontend apache2
+
+-- Install gmond on each worker --
+
+    apt install -y ganglia-monitor
+
+-- Configure gmond on master --
+
+Edit /etc/ganglia/gmond.conf
+
+Find the cluster block and set:
+
+    cluster {
+      name = "mycluster"
+      owner = "admin"
+    }
+
+Find the udp_send_channel block and set:
+
+    udp_send_channel {
+      host = master
+      port = 8649
+      ttl = 1
+    }
+
+Find the udp_recv_channel block and set:
+
+    udp_recv_channel {
+      port = 8649
+    }
+
+-- Configure gmond on each worker --
+
+Edit /etc/ganglia/gmond.conf on each worker.
+
+Change it so workers SEND data to master but do NOT receive:
+
+    cluster {
+      name = "mycluster"
+    }
+
+    udp_send_channel {
+      host = master
+      port = 8649
+      ttl = 1
+    }
+
+    # Remove or comment out udp_recv_channel on workers
+
+-- Configure gmetad on master --
+
+Edit /etc/ganglia/gmetad.conf on master:
+
+    data_source "mycluster" master:8649
+
+This tells gmetad to collect from gmond running on master
+(which already receives data from workers).
+
+-- Set up Ganglia web on master --
+
+    cp /etc/ganglia-webfrontend/apache.conf /etc/apache2/sites-enabled/ganglia.conf
+    systemctl restart apache2
+
+-- Start everything --
+
+On master:
+
+    systemctl enable ganglia-monitor gmetad
+    systemctl start ganglia-monitor gmetad
+
+On each worker:
+
+    systemctl enable ganglia-monitor
+    systemctl start ganglia-monitor
+
+-- Open port for Ganglia --
+
+    ufw allow 8649/udp
+    ufw allow 80/tcp
+
+-- Access the web UI --
+
+Open a browser and go to:
+
+    http://192.168.1.10/ganglia
+
+You should see all four nodes listed with live CPU and memory graphs.
+It may take 1-2 minutes for data to start showing up after first launch.
+
+-- Firewall for Ganglia (on all nodes) --
+
+    ufw allow 8649/udp
+
+
+================================================================
+PART 5 - SUBMITTING JOBS AND MONITORING THE JOB QUEUE
+================================================================
+
+All job submission is done from the MASTER node.
+
+-- Basic job submission --
+
+Quickest way, no script needed:
+
+    sbatch --wrap="hostname && sleep 10"
+
+With a job script (recommended for real work):
+
+Create /shared/job.sh:
+
+    #!/bin/bash
+    #SBATCH --job-name=test-job
+    #SBATCH --nodes=2
+    #SBATCH --ntasks=4
+    #SBATCH --cpus-per-task=1
+    #SBATCH --mem=2G
+    #SBATCH --time=00:05:00
+    #SBATCH --output=/shared/output-%j.txt
+    #SBATCH --error=/shared/error-%j.txt
+
+    echo "Job ID: $SLURM_JOB_ID"
+    echo "Running on: $SLURM_NODELIST"
+    echo "Start time: $(date)"
+    srun hostname
+    sleep 30
+    echo "Done: $(date)"
+
+Submit it:
+
+    sbatch /shared/job.sh
+
+-- Monitoring the job queue --
+
+See all jobs currently queued or running:
+    squeue
+
+See jobs for a specific user:
+    squeue -u youruser
+
+See jobs with more detail:
+    squeue -l
+
+Watch the queue update every 3 seconds:
+    watch -n 3 squeue
+
+See full details of a specific job:
+    scontrol show job <jobid>
+
+-- Understanding job states --
+
+    PD  = Pending (waiting for resources)
+    R   = Running
+    CG  = Completing (cleaning up)
+    CD  = Completed
+    F   = Failed
+    CA  = Cancelled
+
+If a job is stuck in PD, check why:
+    squeue --reason
+
+Common reasons: Resources (not enough free), Priority, Dependency
+
+-- Check node status while jobs run --
+
+    sinfo
+    sinfo -N -l         (detailed per-node view)
+
+-- Job history and accounting --
+
+See jobs that have already finished:
+
+    sacct
+
+See specific job details:
+    sacct -j <jobid> --format=JobID,JobName,State,Elapsed,CPUTime,MaxRSS
+
+-- Submit an array job --
+
+Good for running the same task many times with different inputs:
+
+    sbatch --array=1-10 /shared/job.sh
+
+Each task gets a unique $SLURM_ARRAY_TASK_ID variable you can use
+to differentiate inputs.
+
+-- Cancel a job --
+
+    scancel <jobid>
+
+Cancel all your jobs:
+    scancel -u youruser
+
+Cancel all pending jobs only:
+    scancel -t PD -u youruser
+
+
+================================================================
+PART 6 - LIVE RESOURCE UTILIZATION VIA WEB
+================================================================
+
+You already have Ganglia from Part 4 which gives CPU/memory/network graphs.
+Here are a couple more options depending on what level of detail you need.
+
+-- Option A: Ganglia (already set up) --
+
+URL: http://192.168.1.10/ganglia
+
+What it shows:
+  - Per-node CPU usage (live graph)
+  - Memory used/free
+  - Network in/out
+  - Disk I/O
+  - Load average
+  - You can click on individual nodes for their own graphs
+
+Best for: quick hardware health view, historical graphs
+
+-- Option B: Slurm-web (Slurm-specific dashboard) --
+
+This shows Slurm job queue and node allocation in a browser.
+
+Install on master:
+
+    apt install -y python3-pip
+    pip3 install slurm-web
+
+Or use the community version:
+
+    git clone https://github.com/edf-hpc/slurm-web
+    cd slurm-web
+    pip3 install -r requirements.txt
+
+Configure it to point at your Slurm REST API or slurmctld socket,
+then run it. Check the project's README for the exact startup command
+as it varies by version.
+
+URL once running: http://192.168.1.10:5000
+
+What it shows:
+  - Job queue in real time
+  - Which nodes are running what jobs
+  - Node state (idle, allocated, drained)
+
+-- Option C: Grafana + Prometheus + DCGM (advanced) --
+
+If you want a really polished real-time dashboard this is the standard
+modern approach. More setup involved but much more powerful.
+
+Steps at a high level:
+
+  1. Install Prometheus on master
+     apt install prometheus
+
+  2. Install node_exporter on ALL nodes
+     apt install prometheus-node-exporter
+     This collects CPU, memory, disk, network metrics automatically
+
+  3. Configure Prometheus to scrape all nodes
+     Edit /etc/prometheus/prometheus.yml and add:
+
+         scrape_configs:
+           - job_name: 'nodes'
+             static_configs:
+               - targets:
+                 - master:9100
+                 - worker1:9100
+                 - worker2:9100
+                 - worker3:9100
+
+     Restart: systemctl restart prometheus
+
+  4. Install Grafana on master
+
+         apt install -y software-properties-common
+         add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+         apt update && apt install grafana
+         systemctl enable grafana-server
+         systemctl start grafana-server
+
+  5. Open Grafana at http://192.168.1.10:3000
+     Default login: admin / admin
+
+  6. Add Prometheus as a data source in Grafana UI
+     Settings > Data Sources > Add > Prometheus
+     URL: http://localhost:9090
+
+  7. Import the Node Exporter Full dashboard
+     Go to Dashboards > Import
+     Enter dashboard ID: 1860
+     Select your Prometheus source
+     Click Import
+
+You now have a live dashboard showing all 4 nodes with CPU, memory,
+disk IO, network, and load average updating every few seconds.
+
+-- Ports to open for these services --
+
+    ufw allow 3000/tcp    # Grafana
+    ufw allow 9090/tcp    # Prometheus
+    ufw allow 9100/tcp    # node_exporter (from master only ideally)
+    ufw allow 5000/tcp    # slurm-web if you use it
+
+-- Recommended combination for a demo --
+
+  Use Ganglia for hardware-level metrics (it's already set up).
+  Use "watch -n 2 squeue" in a terminal for the job queue.
+  Use Grafana + Prometheus if you want a really impressive live dashboard.
+
+That gives you everything visible without much extra work.
+
+
+================================================================
+QUICK REFERENCE - COMMANDS YOU'LL USE DAILY
+================================================================
+
+  sbatch job.sh              submit a job
+  squeue                     see all jobs
+  squeue -u <user>           see one user's jobs
+  sinfo                      see node status
+  sinfo -N -l                per-node detail
+  scancel <jobid>            kill a job
+  scontrol show job <id>     full job info
+  scontrol show node worker1 full node info
+  sacct -j <id>              job history
+  srun hostname              quick test across nodes
+
+  On any node:
+  systemctl status munge     check munge
+  systemctl status slurmd    check worker daemon
+  systemctl status slurmctld check master daemon (master only)
+
+
+================================================================
+THINGS THAT GO WRONG AND HOW TO FIX THEM
+================================================================
+
+Nodes show "down" in sinfo:
+  - Check slurmd on that worker: systemctl status slurmd
+  - Check munge on that worker: systemctl status munge
+  - Try: scontrol update nodename=worker1 state=resume
+
+Jobs stuck in PD forever:
+  - Run: squeue --reason
+  - Common fix: nodes may need resuming (see above)
+  - Check slurm.conf CPUs/Memory match the actual hardware
+
+Munge errors:
+  - Almost always a munge.key permission issue
+  - Fix: chown munge:munge /etc/munge/munge.key && chmod 400 /etc/munge/munge.key
+  - Then: systemctl restart munge
+
+NFS mount fails on workers:
+  - Check nfs-kernel-server is running on master
+  - Check exportfs -v shows the /shared export
+  - Check ufw allows NFS from worker IPs
+
+Ganglia not showing data:
+  - Check gmond is running on all nodes: systemctl status ganglia-monitor
+  - Check gmetad is running on master: systemctl status gmetad
+  - Make sure port 8649 UDP is open: ufw allow 8649/udp
+  - Wait 2-3 minutes after start for data to populate
+
+Grafana shows no data:
+  - Check Prometheus is scraping: http://192.168.1.10:9090/targets
+  - All targets should show "UP" in green
+  - If a node shows down, check node_exporter is running on it
+

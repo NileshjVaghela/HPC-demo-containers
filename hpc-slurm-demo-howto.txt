@@ -1,0 +1,251 @@
+HPC with Slurm - Small Workable Demo Howto
+==========================================
+Written in plain language. No fluff.
+
+
+WHAT ARE WE BUILDING?
+---------------------
+A tiny HPC cluster with:
+  - 1 controller node (the boss)
+  - 2 worker nodes (the workers)
+  - Shared storage so everyone sees the same files
+  - Slurm doing the job scheduling
+
+We'll use Docker Compose because it's the fastest way to get this running
+without dealing with actual VMs or physical machines.
+
+
+WHAT YOU NEED BEFORE STARTING
+------------------------------
+  - Docker + Docker Compose installed on your machine
+  - Git
+  - A terminal
+  - About 15-20 minutes
+
+That's it. No cloud account, no extra hardware.
+
+
+STEP 1 - GRAB THE DOCKER SLURM CLUSTER
+----------------------------------------
+Someone already built a ready-to-go Slurm cluster in Docker. Use it.
+
+    git clone https://github.com/giovtorres/slurm-docker-cluster
+    cd slurm-docker-cluster
+
+Take a quick look inside if you're curious. The docker-compose.yml defines
+the controller (slurmctld) and two compute nodes (c1, c2).
+
+
+STEP 2 - SPIN IT UP
+--------------------
+    docker-compose up -d
+
+This pulls the images and starts three containers. Give it a minute or two
+the first time since it needs to download everything.
+
+Check if it's running:
+    docker-compose ps
+
+You should see slurmctld, c1, and c2 all in "Up" state.
+
+
+STEP 3 - GET INSIDE THE CONTROLLER
+------------------------------------
+    docker exec -it slurmctld bash
+
+You're now inside the Slurm controller. This is where you submit jobs from.
+
+Check that the nodes are up:
+    sinfo
+
+You should see something like:
+    PARTITION  AVAIL  TIMELIMIT  NODES  STATE  NODELIST
+    normal*       up   infinite      2   idle  c[1-2]
+
+"idle" means the nodes are ready and waiting for work. Good.
+
+
+STEP 4 - YOUR FIRST JOB
+------------------------
+Let's submit something simple just to see it work.
+
+    sbatch --wrap="echo Hello from \$(hostname)"
+
+Slurm will respond with "Submitted batch job 1" (or whatever number).
+
+Now check the queue:
+    squeue
+
+If it ran fast, the queue might already be empty. That's fine. Check the
+output file it created:
+    cat slurm-1.out
+
+You'll see something like "Hello from c1" -- that's your job running on a
+worker node.
+
+
+STEP 5 - WRITE A PROPER JOB SCRIPT
+-------------------------------------
+Create a file called job.sh inside the container (or use vi/nano):
+
+    cat > job.sh << 'EOF'
+    #!/bin/bash
+    #SBATCH --job-name=my-first-job
+    #SBATCH --nodes=2
+    #SBATCH --ntasks=4
+    #SBATCH --output=output-%j.txt
+
+    echo "Job started on: $(date)"
+    echo "Running on nodes: $SLURM_NODELIST"
+    srun hostname
+    echo "Job done."
+    EOF
+
+Submit it:
+    sbatch job.sh
+
+Watch it run:
+    squeue -i 2
+
+(The -i 2 refreshes every 2 seconds. Ctrl+C to stop watching.)
+
+Check the output when done:
+    cat output-*.txt
+
+You'll see both c1 and c2 reported in there. That's multi-node job execution.
+
+
+STEP 6 - TRY AN ARRAY JOB
+---------------------------
+Array jobs let you run the same script multiple times with different task IDs.
+Handy for parameter sweeps or batch processing.
+
+    sbatch --array=1-5 --wrap="echo I am task number \$SLURM_ARRAY_TASK_ID"
+
+This submits 5 jobs at once. Watch them go:
+    squeue
+
+Then check all the output files:
+    ls slurm-*.out
+    cat slurm-*.out
+
+
+STEP 7 - USEFUL COMMANDS TO KNOW
+----------------------------------
+Here are the commands you'll use most during the demo:
+
+    sinfo                        -- see node status and partitions
+    sinfo -N                     -- node-level detail
+    squeue                       -- see all jobs in the queue
+    squeue -u root               -- jobs for a specific user
+    scontrol show job <jobid>    -- full details of a specific job
+    scancel <jobid>              -- kill a job
+    sacct                        -- job accounting / history
+
+Try them all to get a feel for what each one shows.
+
+
+STEP 8 - SUBMIT A LONG JOB AND CANCEL IT
+------------------------------------------
+Good for showing Slurm control in action during a demo.
+
+    sbatch --wrap="sleep 120"
+
+Check it's running:
+    squeue
+
+Now cancel it:
+    scancel <jobid>
+
+Check again -- it's gone:
+    squeue
+
+
+UNDERSTANDING SLURM.CONF (DON'T TOUCH IT, JUST KNOW IT)
+---------------------------------------------------------
+The heart of Slurm is the slurm.conf file. In this Docker setup it's at
+/etc/slurm/slurm.conf inside the containers.
+
+Key things it defines:
+  - ClusterName: what the cluster is called
+  - SlurmctldHost: which machine is the controller
+  - NodeName: defines each compute node and its resources (CPUs, memory)
+  - PartitionName: groups of nodes with scheduling rules
+
+For the demo you don't need to change anything, but it's worth showing to
+explain how Slurm knows about the cluster layout.
+
+
+MUNGE - THE THING THAT MAKES AUTHENTICATION WORK
+-------------------------------------------------
+Munge runs on every node and makes sure only authorized processes talk to Slurm.
+It uses a shared key (/etc/munge/munge.key) that must be identical on all nodes.
+
+In the Docker setup this is already handled. If you ever set this up manually
+on real machines, copying the munge.key is one of the first things you do.
+
+Check munge is running:
+    systemctl status munge
+
+
+CLEAN UP WHEN YOU'RE DONE
+--------------------------
+Exit the container first:
+    exit
+
+Then bring everything down:
+    docker-compose down
+
+If you want to also remove the volumes (start fresh next time):
+    docker-compose down -v
+
+
+DEMO FLOW SUGGESTION
+---------------------
+If you're presenting this to someone, do it in this order:
+
+  1. Show sinfo -- "here's our cluster, two nodes ready"
+  2. Submit a simple echo job -- "job submitted, here's the ID"
+  3. Show squeue -- "here it is in the queue"
+  4. Show the output file -- "it ran on c1"
+  5. Submit the multi-node job.sh -- "now using both nodes"
+  6. Show the output -- "both c1 and c2 ran work"
+  7. Submit an array job (1-5) -- "five tasks at once"
+  8. Submit a sleep job and cancel it -- "we can kill jobs too"
+  9. Show slurm.conf briefly -- "this is how the cluster is defined"
+
+That covers the core ideas: submitting, monitoring, multi-node, arrays,
+and control. Keeps it to about 10-15 minutes.
+
+
+COMMON THINGS THAT GO WRONG
+-----------------------------
+Nodes stuck in "drain" state:
+    scontrol update nodename=c1 state=resume
+
+Jobs stuck in "PD" (pending) forever:
+    Check sinfo -- nodes might be down
+    Check scontrol show job <id> for the reason
+
+Container won't start:
+    docker-compose logs slurmctld
+    Usually a port conflict or Docker daemon issue
+
+Munge errors in logs:
+    Make sure munge is running on all nodes
+    Make sure the munge.key is the same everywhere
+
+
+GOING FURTHER (IF YOU WANT)
+-----------------------------
+Once you're comfortable with the basics, things worth exploring:
+
+  - Resource limits: add --mem=512M or --cpus-per-task=2 to job scripts
+  - Priorities and fair-share scheduling
+  - Job dependencies: sbatch --dependency=afterok:<jobid>
+  - Running actual MPI jobs with srun
+  - Connecting real NFS storage
+  - Slurm accounting with sacct and sreport
+
+
+That's the full demo. Nothing fancy, but it shows the real thing working.
