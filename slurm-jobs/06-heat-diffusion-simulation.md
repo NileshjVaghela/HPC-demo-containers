@@ -170,7 +170,7 @@ print(f\"  Grid points processed: {grid_size*grid_size*iterations:,}\")
 "
 
 echo ""
-echo "All tasks finished: \$(date)"
+echo "All tasks finished: $(date)"
 SCRIPT'
 
 # Submit the job
