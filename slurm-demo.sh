@@ -52,6 +52,7 @@ for i in $(seq 1 60); do
         log "All 6 containers healthy"
         break
     fi
+    sudo docker start slurm-cpu-worker-2 >/dev/null 2>&1 || true
     if [ "$i" -eq 60 ]; then
         fail "Timeout waiting for containers to be healthy"
     fi
