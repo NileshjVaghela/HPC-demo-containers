@@ -84,7 +84,7 @@ print(f\"\nLargest prime under 1M: {primes[-1]}\")
 "
 
 echo ""
-echo "Finished: \$(date)"
+echo "Finished: $(date)"
 SCRIPT'
 
 # Submit the job

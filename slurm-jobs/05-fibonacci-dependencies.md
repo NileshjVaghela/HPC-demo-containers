@@ -63,42 +63,32 @@ echo "Finished: $(date)"
 #SBATCH --ntasks=1
 #SBATCH --output=fib-analyze-%j.txt
 
-echo "=== Job B: Fibonacci Analysis ==="
-echo "Started: $(date)"
-echo "Running on: $(hostname)"
-echo ""
-
-python3 -c "
+# Use a Here Document (<< 'EOF') so Bash ignores all quotes and special characters
+python3 << 'EOF'
 import math
 
-print('Reading results from Job A...')
-with open('/data/fib_results.txt') as f:
-    data = [line.strip().split(',') for line in f]
-
-print(f'Found {len(data)} entries\n')
-print(f'{\"n\":>10} {\"digits\":>10} {\"ratio\":>10} {\"log10(phi)*n\":>12}')
-print('-' * 45)
+with open("/data/fib_results.txt") as f:
+    data = [line.strip().split(",") for line in f]
 
 phi = (1 + math.sqrt(5)) / 2
 log10_phi = math.log10(phi)
 
+print(f"Analyzing {len(data)} Fibonacci entries")
+# You can now use normal \n instead of chr(10)
+print(f"\n{'n':>10} {'digits':>10} {'ratio':>10}")
+print("-" * 35)
+
 for n_str, d_str in data:
     n, d = int(n_str), int(d_str)
-    expected = int(n * log10_phi) + 1
-    ratio = d / n if n > 0 else 0
-    print(f'{n:>10} {d:>10} {ratio:>10.4f} {expected:>12}')
+    ratio = d / n
+    print(f"{n:>10} {d:>10} {ratio:>10.5f}")
 
-print(f'\nlog10(phi) = {log10_phi:.6f}')
-print('The ratio of digits/n converges to log10(phi) ≈ 0.20898')
+print(f"\nDigits/n converges to log10(phi) = {log10_phi:.5f}")
 
-with open('/data/fib_analysis.txt', 'w') as f:
-    f.write(f'log10_phi={log10_phi}\n')
-    f.write(f'entries={len(data)}\n')
-print('\nAnalysis written to /data/fib_analysis.txt')
-"
-
-echo ""
-echo "Finished: $(date)"
+with open("/data/fib_analysis.txt", "w") as f:
+    f.write(f"log10_phi={log10_phi}\n")
+    f.write(f"entries={len(data)}\n")
+EOF
 ```
 
 ### Job C: Final summary

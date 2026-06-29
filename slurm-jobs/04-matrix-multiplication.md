@@ -97,7 +97,7 @@ print(f\"Result C[n-1][n-1] = {C[n-1][n-1]:.6f}\")
 "
 
 echo ""
-echo "Finished: \$(date)"
+echo "Finished: $(date)"
 SCRIPT'
 
 # Submit the array job

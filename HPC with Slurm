@@ -17,14 +17,49 @@ Our setup:
   worker2 192.168.1.12
   worker3 192.168.1.13
 
+This guide assumes root SSH access is enabled.
+
+On every node:
+
+Set a root password:
+
+    sudo passwd root
+
+Edit SSH configuration:
+
+    sudo nano /etc/ssh/sshd_config
+
+Find:
+
+    #PermitRootLogin prohibit-password
+
+Change to:
+
+    PermitRootLogin yes
+
+Ensure:
+
+    PasswordAuthentication yes
+
+Restart SSH:
+
+    sudo systemctl restart ssh
+
+Test from another node:
+
+    ssh root@worker1
+
 
 ================================================================
 PART 1 - SETTING UP THE MASTER NODE
 ================================================================
+Run everything as root.
 
 First, set the hostname on the master:
 
     hostnamectl set-hostname master
+
+Reboot or log out/in after changing the hostname to ensure all services pick up the new hostname.
 
 Edit /etc/hosts on ALL machines (master and all workers).
 Add these lines at the bottom:
@@ -39,16 +74,24 @@ This lets all machines talk to each other by name.
 -- Install required packages on master --
 
     apt update && apt upgrade -y
-    apt install -y munge slurm-wm nfs-kernel-server slurmctld slurmdbd
+    apt install -y munge slurm-wlm nfs-kernel-server slurmctld slurmdbd
 
 -- Set up Munge on master --
 
 Munge handles authentication between all nodes.
 Generate the munge key (only do this on master):
 
-    create-munge-key
-    chown munge:munge /etc/munge/munge.key
-    chmod 400 /etc/munge/munge.key
+    For Ubuntu 24.04, the munge key is automatically generated during package installation.
+
+    Verify it exists:
+
+        ls -l /etc/munge/munge.key
+
+    If the key is missing, generate one manually:
+
+        mungekey
+        chown munge:munge /etc/munge/munge.key
+        chmod 400 /etc/munge/munge.key
 
 Start and enable munge:
 
@@ -72,6 +115,10 @@ Create the shared directory:
     chmod 777 /shared
 
 Edit /etc/exports and add:
+Replace 192.168.1.0/24 with the subnet used by your cluster network.
+    For example:
+        192.168.0.0/24
+        10.0.0.0/24
 
     /shared  192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
 
@@ -85,9 +132,13 @@ Apply the export:
 
 Slurm needs a dedicated system user. Same UID/GID must exist on ALL nodes.
 
+If the slurm user does not already exist:
+
     groupadd -g 1001 slurm
     useradd -m -c "Slurm Workload Manager" -d /var/lib/slurm \
             -u 1001 -g slurm -s /bin/bash slurm
+
+Otherwise, keep the existing slurm user and ensure the same UID/GID exists on all nodes.
 
 -- Create Slurm directories on master --
 
@@ -96,23 +147,126 @@ Slurm needs a dedicated system user. Same UID/GID must exist on ALL nodes.
     chown slurm:slurm /var/spool/slurmctld
     chown slurm:slurm /var/log/slurm
 
+-- Optional: Configure Slurm Accounting (sacct support) --
+
+If you want to track completed jobs using:
+    sacct
+
+or manage users, accounts, and cluster statistics, configure SlurmDBD before creating `slurm.conf`.
+
+Install MariaDB:
+    apt install -y mariadb-server
+
+Enable and start:
+    systemctl enable mariadb
+    systemctl start mariadb
+
+Secure the installation:    
+    mysql_secure_installation
+
+Create the accounting database:
+    mysql -u root -p
+
+Inside MariaDB:
+    CREATE DATABASE slurm_acct_db;
+
+    CREATE USER 'slurm'@'localhost'
+    IDENTIFIED BY 'StrongPasswordHere';
+
+    GRANT ALL PRIVILEGES
+    ON slurm_acct_db.*
+    TO 'slurm'@'localhost';
+
+    FLUSH PRIVILEGES;
+
+    EXIT;
+
+Create:
+    /etc/slurm/slurmdbd.conf
+
+with:
+    AuthType=auth/munge
+
+    DbdHost=master
+    DbdPort=6819
+
+    SlurmUser=slurm
+
+    StorageType=accounting_storage/mysql
+
+    StorageHost=localhost
+    StoragePort=3306
+
+    StorageUser=slurm
+    StoragePass=StrongPasswordHere
+
+    StorageLoc=slurm_acct_db
+
+Secure the file:
+    chown slurm:slurm /etc/slurm/slurmdbd.conf
+    chmod 600 /etc/slurm/slurmdbd.conf
+
+Enable and start SlurmDBD:
+    systemctl enable slurmdbd
+    systemctl start slurmdbd
+
+Verify:
+    systemctl status slurmdbd
+
+The following settings must then be added to `slurm.conf`:
+    AccountingStorageType=accounting_storage/slurmdbd
+    AccountingStorageHost=master
+    AccountingStoragePort=6819
+
+    JobAcctGatherType=jobacct_gather/linux
+
+After Slurm is configured and running:
+    sacctmgr add cluster mycluster
+
+Verify:
+    sacctmgr show cluster
+
+Accounting can be tested with:
+    sacct
+
+This section is optional. If omitted, Slurm scheduling and job execution still work normally, but completed-job history and accounting features will not be available.
+
+
 -- Write the slurm.conf on master --
 
-This is the main config file. Create /etc/slurm/slurm.conf with:
+This is the main Slurm configuration file.
+
+Before creating the configuration, gather hardware information from each worker:
+
+    slurmd -C
+
+Use the reported CPUs and RealMemory values when defining nodes.
+
+Create /etc/slurm/slurm.conf:
 
     ClusterName=mycluster
+
     SlurmctldHost=master
+
     AuthType=auth/munge
-    CryptoType=crypto/munge
-    MpiDefault=none
-    ProctrackType=proctrack/pgid
-    ReturnToService=2
-    SlurmctldPidFile=/var/run/slurmctld.pid
-    SlurmdPidFile=/var/run/slurmd.pid
-    SlurmdSpoolDir=/var/spool/slurmd
+
     SlurmUser=slurm
+
     StateSaveLocation=/var/spool/slurmctld
+    SlurmdSpoolDir=/var/spool/slurmd
+
+    SlurmctldPidFile=/run/slurmctld.pid
+    SlurmdPidFile=/run/slurmd.pid
+
+    SlurmctldPort=6817
+    SlurmdPort=6818
+
     SwitchType=switch/none
+    MpiDefault=none
+
+    ProctrackType=proctrack/linuxproc
+    ReturnToService=2
+
     TaskPlugin=task/affinity
 
     # Logging
@@ -124,13 +278,20 @@ This is the main config file. Create /etc/slurm/slurm.conf with:
     SelectType=select/cons_tres
     SelectTypeParameters=CR_Core
 
-    # Time limits
+    # Accounting (optional but recommended)
+    AccountingStorageType=accounting_storage/slurmdbd
+    AccountingStorageHost=master
+    AccountingStoragePort=6819
+
+    JobAcctGatherType=jobacct_gather/linux
+
+    # Time limits and cleanup
     InactiveLimit=0
     KillWait=30
     MinJobAge=300
+
     SlurmctldTimeout=120
     SlurmdTimeout=300
-    Waittime=0
 
     # Node definitions
     # Adjust CPUs and RealMemory to match your actual hardware
@@ -141,9 +302,17 @@ This is the main config file. Create /etc/slurm/slurm.conf with:
     # Partition (queue) definition
     PartitionName=normal Nodes=worker[1-3] Default=YES MaxTime=INFINITE State=UP
 
-Adjust CPUs and RealMemory to match your actual worker hardware.
-To check CPU count on a worker: nproc
-To check RAM on a worker: free -m
+
+Notes:
+
+* Replace master with your controller hostname.
+* Replace all IP addresses with your actual node IPs.
+* Replace CPUs and RealMemory with values reported by `slurmd -C`.
+* If a worker's Linux hostname differs from its Slurm node name, add:
+    NodeHostname=<actual-linux-hostname>
+
+  Example:
+    NodeName=worker1 NodeHostname=my-laptop NodeAddr=192.168.1.11 CPUs=8 RealMemory=16000 State=UNKNOWN
 
 -- Start slurmctld on master --
 
@@ -182,7 +351,7 @@ Same as master. Add all four entries:
 -- Install packages on each worker --
 
     apt update && apt upgrade -y
-    apt install -y munge slurm-wm slurmd nfs-common
+    apt install -y munge slurm-wlm slurmd nfs-common
 
 -- Copy munge key from master to each worker --
 
@@ -216,16 +385,31 @@ Mount it now without rebooting:
 
     mount -a
 
+If you see a warning that systemd is using an older version of the file, reload systemd and try again:
+
+    systemctl daemon-reload
+    mount -a
+
 Check it mounted:
     df -h | grep shared
 
 -- Create slurm user on each worker --
 
-Must be the exact same UID and GID as on master:
+The slurm user and group must exist on every node and use the same UID/GID.
+
+Check whether the account already exists:
+
+    id slurm
+
+If it does not exist, create it:
 
     groupadd -g 1001 slurm
     useradd -m -c "Slurm Workload Manager" -d /var/lib/slurm \
             -u 1001 -g slurm -s /bin/bash slurm
+
+Verify the UID/GID matches the master node:
+
+    id slurm
 
 -- Create slurm directories on each worker --
 
@@ -428,6 +612,37 @@ It may take 1-2 minutes for data to start showing up after first launch.
 
     ufw allow 8649/udp
 
+-- Troubleshooting --
+
+Check gmond:
+
+systemctl status ganglia-monitor
+
+Check gmetad:
+
+systemctl status gmetad
+
+Check Apache:
+
+systemctl status apache2
+
+Check Ganglia data:
+
+gstat -a
+
+Check Apache errors:
+
+tail -f /var/log/apache2/error.log
+
+NOTE (Ubuntu 24.04):
+
+Ganglia Web Frontend 3.7.x may show HTTP 500 errors due to PHP compatibility issues.
+
+If that happens, inspect:
+
+tail -f /var/log/apache2/error.log
+
+and install a compatible PHP version if required.
 
 ================================================================
 PART 5 - SUBMITTING JOBS AND MONITORING THE JOB QUEUE

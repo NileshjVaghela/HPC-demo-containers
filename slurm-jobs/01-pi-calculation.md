@@ -110,7 +110,7 @@ print(f"\nTotal digits computed: {len(pi_str) - 2}")
 print(f"Computation time: {elapsed:.3f} seconds")
 EOF
 
-echo "Finished: \$(date)"
+echo "Finished: $(date)"
 SCRIPT'
 
 # Submit the job
